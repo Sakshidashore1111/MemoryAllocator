@@ -86,6 +86,6 @@ header:
 - [x] Automated test suite
 - [x] Thread safety v1 — global mutex, verified by 4-thread stress test (80k ops)
 - [ ] Thread safety v2 — per-thread caches to eliminate lock contention
-- [ ] Segregated size-class memory pools for O(1) small allocations
+- [x] Segregated size-class memory pools for O(1) small allocations
 - [ ] Benchmarks vs. glibc malloc
 - [ ] `LD_PRELOAD` support to run real programs on this allocator
