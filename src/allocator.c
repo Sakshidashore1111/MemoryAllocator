@@ -16,6 +16,7 @@ typedef struct block_header {
     size_t               size;     /* usable bytes in this block   */
     unsigned int         magic;    /* corruption / bad-free detect */
     int                  is_free;  /* 1 = free, 0 = in use         */
+    int pool_class;
     struct block_header *next;     /* next block in the list       */
 } __attribute__((aligned(16))) block_header_t;
 
@@ -25,6 +26,45 @@ typedef struct block_header {
 static block_header_t *head = NULL;  /* start of the block list */
 
 static pthread_mutex_t alloc_lock = PTHREAD_MUTEX_INITIALIZER;
+/* ---------- memory pools: segregated size classes ---------- */
+
+#define NUM_CLASSES 10
+static const size_t class_sizes[NUM_CLASSES] =
+    { 16, 32, 48, 64, 96, 128, 192, 256, 384, 512 };
+
+#define POOL_BYTES (64 * 1024)          /* one tray = 64 KB slab */
+
+static block_header_t *bins[NUM_CLASSES];   /* free-slot list per class */
+
+static int size_to_class(size_t size)
+{
+    for (int i = 0; i < NUM_CLASSES; i++)
+        if (size <= class_sizes[i])
+            return i;
+    return -1;                          /* too big: use the old path */
+}
+
+static int refill_pool(int cls)
+{
+    size_t slot = HDR_SIZE + class_sizes[cls];
+    void *mem = mmap(NULL, POOL_BYTES, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED)
+        return -1;
+
+    size_t count = POOL_BYTES / slot;   /* how many muffins fit the tray */
+    char *p = (char *)mem;
+    for (size_t i = 0; i < count; i++) {
+        block_header_t *hdr = (block_header_t *)(p + i * slot);
+        hdr->size       = class_sizes[cls];
+        hdr->magic      = MAGIC;
+        hdr->is_free    = 1;
+        hdr->pool_class = cls;
+        hdr->next       = bins[cls];    /* push onto the bin's list */
+        bins[cls]       = hdr;
+    }
+    return 0;
+}
 /* ---------- ask the OS for a fresh slab ---------- */
 
 static block_header_t *request_chunk(size_t min_bytes)
@@ -42,6 +82,7 @@ static block_header_t *request_chunk(size_t min_bytes)
     hdr->size    = total - HDR_SIZE;
     hdr->magic   = MAGIC;
     hdr->is_free = 1;
+    hdr->pool_class = -1;
     hdr->next    = NULL;
 
     /* append to the end of the list */
@@ -66,6 +107,7 @@ static void split_block(block_header_t *hdr, size_t size)
         nb->size    = hdr->size - size - HDR_SIZE;
         nb->magic   = MAGIC;
         nb->is_free = 1;
+        nb->pool_class = -1;
         nb->next    = hdr->next;
 
         hdr->size = size;
@@ -89,14 +131,30 @@ void *my_malloc(size_t size)
 
     size = ALIGN16(size);
 
-    pthread_mutex_lock(&alloc_lock);          /* take the key */
+    pthread_mutex_lock(&alloc_lock);
 
+    /* FAST PATH: small sizes come from a pool — O(1) */
+    int cls = size_to_class(size);
+    if (cls >= 0) {
+        if (bins[cls] == NULL && refill_pool(cls) != 0) {
+            pthread_mutex_unlock(&alloc_lock);
+            return NULL;
+        }
+        block_header_t *hdr = bins[cls];
+        bins[cls]    = hdr->next;       /* pop the top muffin */
+        hdr->next    = NULL;
+        hdr->is_free = 0;
+        pthread_mutex_unlock(&alloc_lock);
+        return (void *)(hdr + 1);
+    }
+
+    /* SLOW PATH: large sizes use the first-fit block list */
     block_header_t *cur = head;
     while (cur != NULL) {
         if (cur->is_free && cur->size >= size) {
             split_block(cur, size);
             cur->is_free = 0;
-            pthread_mutex_unlock(&alloc_lock); /* hang key back: exit 1 */
+            pthread_mutex_unlock(&alloc_lock);
             return (void *)(cur + 1);
         }
         cur = cur->next;
@@ -104,13 +162,13 @@ void *my_malloc(size_t size)
 
     block_header_t *fresh = request_chunk(size);
     if (fresh == NULL) {
-        pthread_mutex_unlock(&alloc_lock);     /* exit 2 */
+        pthread_mutex_unlock(&alloc_lock);
         return NULL;
     }
 
     split_block(fresh, size);
     fresh->is_free = 0;
-    pthread_mutex_unlock(&alloc_lock);         /* exit 3 */
+    pthread_mutex_unlock(&alloc_lock);
     return (void *)(fresh + 1);
 }
 
@@ -134,6 +192,16 @@ void my_free(void *ptr)
         return;
     }
 
+    /* FAST PATH: pool slot -> push back onto its tray */
+    if (hdr->pool_class >= 0) {
+        hdr->is_free = 1;
+        hdr->next    = bins[hdr->pool_class];
+        bins[hdr->pool_class] = hdr;
+        pthread_mutex_unlock(&alloc_lock);
+        return;
+    }
+
+    /* SLOW PATH: large block -> mark free and coalesce neighbors */
     hdr->is_free = 1;
 
     if (hdr->next && hdr->next->is_free && adjacent(hdr, hdr->next)) {
@@ -192,15 +260,21 @@ void my_alloc_stats(void)
 {
     size_t blocks = 0, free_blocks = 0;
     size_t used_bytes = 0, free_bytes = 0;
+    size_t pool_free_slots = 0;
 
     for (block_header_t *cur = head; cur != NULL; cur = cur->next) {
         blocks++;
         if (cur->is_free) { free_blocks++; free_bytes += cur->size; }
         else              { used_bytes += cur->size; }
     }
+    for (int i = 0; i < NUM_CLASSES; i++)
+        for (block_header_t *c = bins[i]; c != NULL; c = c->next)
+            pool_free_slots++;
+
     fprintf(stderr,
         "---- myalloc stats ----\n"
-        "blocks: %zu (free: %zu)\n"
-        "bytes in use: %zu | bytes free: %zu\n",
-        blocks, free_blocks, used_bytes, free_bytes);
+        "large blocks: %zu (free: %zu)\n"
+        "large bytes in use: %zu | free: %zu\n"
+        "pool slots free: %zu\n",
+        blocks, free_blocks, used_bytes, free_bytes, pool_free_slots);
 }
