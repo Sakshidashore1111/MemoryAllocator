@@ -84,7 +84,8 @@ header:
 - [x] First-fit allocation, splitting, coalescing
 - [x] Double-free and corruption detection
 - [x] Automated test suite
-- [ ] Thread safety (mutex, then per-thread caches)
+- [x] Thread safety v1 — global mutex, verified by 4-thread stress test (80k ops)
+- [ ] Thread safety v2 — per-thread caches to eliminate lock contention
 - [ ] Segregated size-class memory pools for O(1) small allocations
 - [ ] Benchmarks vs. glibc malloc
 - [ ] `LD_PRELOAD` support to run real programs on this allocator
