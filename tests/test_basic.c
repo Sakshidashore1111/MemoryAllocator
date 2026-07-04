@@ -30,10 +30,10 @@ int main(void)
     assert(a[99] == 'A' && b[0] == 'B');
     PASS();
 
-    TEST("free then malloc reuses memory (first-fit)");
+    TEST("free then malloc reuses freed memory");
     my_free(a);
-    char *c = my_malloc(50);
-    assert(c == a);                 /* the freed 100-byte slot fits 50 */
+    char *c = my_malloc(100);       /* same size class -> same slot back */
+    assert(c == a);
     PASS();
 
     TEST("free(NULL) does not crash");

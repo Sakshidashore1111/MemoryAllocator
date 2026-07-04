@@ -1,7 +1,7 @@
 CC     = gcc
 CFLAGS = -Wall -Wextra -g -Iinclude -pthread
 
-.PHONY: all test test_basic test_threads test_pools clean
+.PHONY: all test test_basic test_threads test_pools clean bench clean
 
 all: test
 
@@ -19,5 +19,9 @@ test_pools: src/allocator.c tests/test_pools.c
 	$(CC) $(CFLAGS) src/allocator.c tests/test_pools.c -o test_pools
 	./test_pools
 
+bench: src/allocator.c bench/bench.c
+	$(CC) $(CFLAGS) -O2 src/allocator.c bench/bench.c -o bench_run
+	./bench_run
+
 clean:
-	rm -f test_basic test_threads test_pools
+	rm -f test_basic test_threads test_pools bench_run
