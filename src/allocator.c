@@ -3,7 +3,7 @@
 #include <stdio.h>      /* fprintf for errors/stats */
 #include <string.h>     /* memset, memcpy */
 #include <stdint.h>     /* uintptr_t */
-
+#include <pthread.h>    /* mutex + threads */
 /* ---------- configuration ---------- */
 
 #define CHUNK_SIZE   (1024 * 1024)          /* ask OS for 1 MB at a time  */
@@ -24,6 +24,7 @@ typedef struct block_header {
 
 static block_header_t *head = NULL;  /* start of the block list */
 
+static pthread_mutex_t alloc_lock = PTHREAD_MUTEX_INITIALIZER;
 /* ---------- ask the OS for a fresh slab ---------- */
 
 static block_header_t *request_chunk(size_t min_bytes)
@@ -88,52 +89,58 @@ void *my_malloc(size_t size)
 
     size = ALIGN16(size);
 
-    /* first-fit: walk the list for a free block big enough */
+    pthread_mutex_lock(&alloc_lock);          /* take the key */
+
     block_header_t *cur = head;
     while (cur != NULL) {
         if (cur->is_free && cur->size >= size) {
             split_block(cur, size);
             cur->is_free = 0;
-            return (void *)(cur + 1);     /* payload starts after label */
+            pthread_mutex_unlock(&alloc_lock); /* hang key back: exit 1 */
+            return (void *)(cur + 1);
         }
         cur = cur->next;
     }
 
-    /* nothing fit: get a new slab from the OS and retry on it */
     block_header_t *fresh = request_chunk(size);
-    if (fresh == NULL)
+    if (fresh == NULL) {
+        pthread_mutex_unlock(&alloc_lock);     /* exit 2 */
         return NULL;
+    }
 
     split_block(fresh, size);
     fresh->is_free = 0;
+    pthread_mutex_unlock(&alloc_lock);         /* exit 3 */
     return (void *)(fresh + 1);
 }
 
 void my_free(void *ptr)
 {
     if (ptr == NULL)
-        return;                            /* free(NULL) is legal: do nothing */
+        return;
 
-    block_header_t *hdr = (block_header_t *)ptr - 1;   /* step back to label */
+    block_header_t *hdr = (block_header_t *)ptr - 1;
+
+    pthread_mutex_lock(&alloc_lock);
 
     if (hdr->magic != MAGIC) {
+        pthread_mutex_unlock(&alloc_lock);
         fprintf(stderr, "myalloc: bad or corrupted pointer %p\n", ptr);
         return;
     }
     if (hdr->is_free) {
+        pthread_mutex_unlock(&alloc_lock);
         fprintf(stderr, "myalloc: double free detected at %p\n", ptr);
         return;
     }
 
     hdr->is_free = 1;
 
-    /* coalesce with the NEXT block if free and physically adjacent */
     if (hdr->next && hdr->next->is_free && adjacent(hdr, hdr->next)) {
         hdr->size += HDR_SIZE + hdr->next->size;
         hdr->next  = hdr->next->next;
     }
 
-    /* coalesce with the PREVIOUS block: find it by walking */
     block_header_t *prev = NULL, *cur = head;
     while (cur != NULL && cur != hdr) {
         prev = cur;
@@ -143,6 +150,8 @@ void my_free(void *ptr)
         prev->size += HDR_SIZE + hdr->size;
         prev->next  = hdr->next;
     }
+
+    pthread_mutex_unlock(&alloc_lock);
 }
 
 void *my_calloc(size_t count, size_t size)
