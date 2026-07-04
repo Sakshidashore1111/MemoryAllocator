@@ -111,7 +111,7 @@ make bench
 - [x] Double-free and corruption detection
 - [x] Automated test suite
 - [x] Thread safety v1 — global mutex, verified by 4-thread stress test (80k ops)
-- [ ] Thread safety v2 — per-thread caches to eliminate lock contention
+- [x] Thread safety v2 — per-thread caches to eliminate lock contention
 - [x] Segregated size-class memory pools for O(1) small allocations
 - [x] Benchmarks vs. glibc malloc
 - [ ] `LD_PRELOAD` support to run real programs on this allocator
